@@ -1,0 +1,49 @@
+project: savantenvs/abc
+target: demo
+
+# File-input (CLI) target: feed the fuzz bytes as a circuit file to ABC's static-library demo
+# (src/demo.c). demo runs the whole ABC pipeline on the input — `read @@` (Io_Read auto-detects the
+# format from the file: AIGER / BLIF / Verilog / PLA / BAF / …), then balance, print_stats, a
+# rewrite/refactor synthesis script, and `cec` equivalence verification. The natural fuzz surface is
+# ABC's circuit reader + AIG synthesis engine on a file, so this is a direct file-input target (no
+# libFuzzer harness). @@ is the input-file placeholder.
+#
+# Ported from the old integration's target (old: `/demo @@` on a fixed /test.aig path). Kept the
+# `demo` target name for parity. The seed is ABC's own i10.aig (a real binary-AIGER circuit shipped
+# in the repo), so Mayhem starts from a valid circuit and mutates into the parser/synthesis surface.
+cmds:
+  - cmd: /mayhem/demo @@
+    # demo writes result.blif to its CWD (then reads it back for `cec`), so the process needs a
+    # writable cwd. That is NOT done here with a `cwd:` key: on a raw (non-libFuzzer)
+    # process-per-input target, a per-cmd `cwd:` restart-loops mayhem-fuzz ITSELF (rc 254) and the
+    # run records 0 edges / 0 tests while build + fuzz-smoke + the Action all pass (#661 — this is
+    # exactly why run#50 sat at 0 edges). The chdir("/tmp") now happens INSIDE the binary via
+    # mayhem/abc_wrapper_main.c + -Dmain=abc_demo_original_main in build.sh, mirroring
+    # microscheme_wrapper_main.c (0 -> 28,084 edges) and svf/saber (0 -> 66,509).
+    #
+    # MFUZZ_COMPAT_LEVEL is deliberately KEPT: armips sets it on a raw target and is green, so it is
+    # not implicated in #661. Changing only the one proven-bad key keeps attribution clean if this
+    # run still misbehaves.
+    # demo runs ABC's WHOLE pipeline per input — read, balance, a rewrite/refactor synthesis script,
+    # then a `cec` equivalence check — so a valid circuit is not cheap. Measured in this image:
+    # trivial/garbage input 0.43s (rejected early), but the real i10.aig seed 1.13s. Mayhem's DEFAULT
+    # per-execution timeout is 2s, and run #3 died in the sanity phase with "Your target did not
+    # terminate within the default timeout (2 seconds)" — a loaded worker clears 2s on the seed even
+    # though this box does not. 10s gives headroom for a mutated circuit larger than the seed without
+    # letting a genuinely hung input stall the campaign; garbage still fails fast at ~0.4s, so
+    # throughput is unaffected for the overwhelming majority of inputs.
+    timeout: 10
+    env:
+      MFUZZ_COMPAT_LEVEL: "1"
+# demo reads a structured AIGER/BLIF circuit; random bytes are rejected at the
+# header before any synthesis edges are reached.  The i10.aig seed (ABC's own
+# benchmark circuit) drives the reader + balancer + rewriter into real synthesis
+# coverage on the very first iteration, so the testsuite seed is load-bearing.
+# mayhem-lint: keep-testsuite
+# An inline comment on the `testsuite:` KEY line aborts run-creation on the CI runner, and an
+# absolute file:/// entry aborts it too (#158) — both were present here. Canonical two-entry form:
+# the server tar (required, or the corpus never accumulates — #124) plus the relative per-target
+# seed path. Seeds moved mayhem/testsuite/demo -> mayhem/demo/testsuite to match.
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/demo/testsuite
